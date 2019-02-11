@@ -56,6 +56,8 @@ collecting template definitions.
 
 from __future__ import unicode_literals, division
 
+import base64
+import pickle
 import sys
 import argparse
 import bz2
@@ -72,31 +74,11 @@ from multiprocessing import Queue, Process, Value, cpu_count
 from timeit import default_timer
 
 
-PY2 = sys.version_info[0] == 2
-# Python 2.7 compatibiity
-if PY2:
-    from urllib import quote
-    from htmlentitydefs import name2codepoint
-    from itertools import izip as zip, izip_longest as zip_longest
-    range = xrange  # Use Python 3 equivalent
-    chr = unichr    # Use Python 3 equivalent
-    text_type = unicode
-    
-    class SimpleNamespace(object):
-        def __init__ (self, **kwargs):
-            self.__dict__.update(kwargs)
-        def __repr__ (self):
-            keys = sorted(self.__dict__)
-            items = ("{}={!r}".format(k, self.__dict__[k]) for k in keys)
-            return "{}({})".format(type(self).__name__, ", ".join(items))
-        def __eq__ (self, other):
-            return self.__dict__ == other.__dict__
-else:
-    from urllib.parse import quote
-    from html.entities import name2codepoint
-    from itertools import zip_longest
-    from types import SimpleNamespace
-    text_type = str
+from urllib.parse import quote
+from html.entities import name2codepoint
+from itertools import zip_longest
+from types import SimpleNamespace
+text_type = str
 
 
 # ===========================================================================
@@ -146,6 +128,10 @@ options = SimpleNamespace(
     ##
     # Whether to preserve links in output
     keepLinks = False,
+
+    ##
+    # Whether to preserve links in output
+    collect_links = False,
 
     ##
     # Whether to preserve section titles
@@ -538,6 +524,7 @@ class Extractor(object):
         self.recursion_exceeded_2_errs = 0  # template recursion within expandTemplate()
         self.recursion_exceeded_3_errs = 0  # parameter recursion
         self.template_title_errs = 0
+        self.internal_links = dict()
 
     def write_output(self, out, text):
         """
@@ -550,7 +537,9 @@ class Extractor(object):
                 'id': self.id,
                 'url': url,
                 'title': self.title,
-                'text': "\n".join(text)
+                'text': text,
+                # 'text': "\n".join(text),
+                'internal_links': base64.b64encode(pickle.dumps(self.internal_links)).decode('utf-8')
             }
             if options.print_revision:
                 json_data['revid'] = self.revid
@@ -633,7 +622,11 @@ class Extractor(object):
         
         if sum(len(line) for line in text) < options.min_text_length:
             return
-        
+
+        # print("\n".join(text))
+        internal_links, text = collectAndReplaceInternalLinks("\n".join(text))
+        self.internal_links = internal_links
+
         self.write_output(out, text)
         
         errs = (self.template_title_errs,
@@ -707,9 +700,6 @@ class Extractor(object):
         # residuals of unbalanced quotes
         text = text.replace("'''", '').replace("''", '"')
 
-        # replace internal links
-        text = replaceInternalLinks(text)
-
         # replace external links
         text = replaceExternalLinks(text)
 
@@ -725,6 +715,11 @@ class Extractor(object):
             res += unescape(text[cur:m.start()]) + m.group(1)
             cur = m.end()
         text = res + unescape(text[cur:])
+
+        # replace internal links
+        # text = replaceInternalLinks(text)
+        # internal_links, text = collectAndReplaceInternalLinks(text)
+
         return text
 
 
@@ -2097,6 +2092,7 @@ def replaceInternalLinks(text):
     # triple closing ]]].
     cur = 0
     res = ''
+    internal_links = dict()
     for s, e in findBalanced(text):
         m = tailRE.match(text, e)
         if m:
@@ -2111,6 +2107,7 @@ def replaceInternalLinks(text):
         if pipe < 0:
             title = inner
             label = title
+            internal_links[(len(res), len(res+label))] = title
         else:
             title = inner[:pipe].rstrip()
             # find last |
@@ -2121,9 +2118,63 @@ def replaceInternalLinks(text):
                     pipe = last  # advance
                 curp = e1
             label = inner[pipe + 1:].strip()
-        res += text[cur:s] + makeInternalLink(title, label) + trail
+            title, label = makeInternalLink(title, label)
+        res += text[cur:s] + '[[' + title + '|' + label + ']]' + trail
         cur = end
     return res + text[cur:]
+
+
+
+
+def collectAndReplaceInternalLinks(text):
+    """
+    Replaces internal links of the form:
+    [[title |...|label]]trail
+
+    with title concatenated with trail, when present, e.g. 's' for plural.
+
+    See https://www.mediawiki.org/wiki/Help:Links#Internal_links
+    """
+    # call this after removal of external links, so we need not worry about
+    # triple closing ]]].
+    cur = 0
+    res = ''
+    internal_links = dict()
+    for s, e in findBalanced(text):
+        m = tailRE.match(text, e)
+        if m:
+            trail = m.group(0)
+            end = m.end()
+        else:
+            trail = ''
+            end = e
+        inner = text[s + 2:e - 2]
+        # find first |
+        pipe = inner.find('|')
+        colon = inner.find(':')
+        if colon > 0 and colon < pipe:
+            cur = end
+            continue
+        if pipe < 0:
+            title = inner
+            label = title
+            internal_links[(len(res + text[cur:s]), len(res + text[cur:s] +label))] = [title, title]
+        else:
+            title = inner[:pipe].rstrip()
+            # find last |
+            curp = pipe + 1
+            for s1, e1 in findBalanced(inner):
+                last = inner.rfind('|', curp, s1)
+                if last >= 0:
+                    pipe = last  # advance
+                curp = e1
+            label = inner[pipe + 1:].strip()
+            # title, label = makeInternalLink(title, label)
+            begin_link = len(res + text[cur:s])
+            internal_links[(begin_link, begin_link + len(label))] = [label, title]
+        res += text[cur:s] + label + trail
+        cur = end
+    return internal_links, res + text[cur:]
 
 
 # the official version is a method in class Parser, similar to this:
@@ -2391,20 +2442,41 @@ def replaceInternalLinks(text):
 #     return holders
 
 
+import re
+wikt_links_pattern = re.compile('wikt:(.*)')
+
 def makeInternalLink(title, label):
     colon = title.find(':')
     if colon > 0 and title[:colon] not in options.acceptedNamespaces:
-        return ''
+        return '', ''
     if colon == 0:
         # drop also :File:
         colon2 = title.find(':', colon + 1)
         if colon2 > 1 and title[colon + 1:colon2] not in options.acceptedNamespaces:
-            return ''
+            return '', ''
     if options.keepLinks:
-        return '<a href="%s">%s</a>' % (quote(title.encode('utf-8')), label)
+        return '', '<a href="%s">%s</a>' % (quote(title.encode('utf-8')), label)
+    elif options.collect_links:
+        return_string = ""
+        wikt_links_pattern_search = wikt_links_pattern.search(title)
+        if wikt_links_pattern_search:
+            wikt_links_pattern_search_group1 = wikt_links_pattern_search.group(1)
+            return_string = wikt_links_pattern_search_group1
+        else:
+            return_string = title
+        return_string = snip_anchor(return_string)
+        if len(return_string) > 1:
+            return_string = return_string[0].upper() + return_string[1:]
+        return return_string, label
     else:
-        return label
+        return '', label
 
+
+def snip_anchor(text:str) -> str:
+    snip_anchor = text.find('#')
+    if snip_anchor != -1:
+        text = text[:snip_anchor]
+    return text
 
 # ----------------------------------------------------------------------
 # External links
@@ -2991,8 +3063,8 @@ def extract_process(opts, i, jobs_queue, output_queue):
     createLogger(options.quiet, options.debug)
 
     out = StringIO()                 # memory buffer
-    
-    
+
+
     while True:
         job = jobs_queue.get()  # job is (id, title, page, page_num)
         if job:
@@ -3036,7 +3108,7 @@ def reduce_process(opts, output_queue, spool_length,
         nextFile = NextFile(out_file)
         output = OutputSplitter(nextFile, file_size, file_compress)
     else:
-        output = sys.stdout if PY2 else sys.stdout.buffer
+        output = sys.stdout.buffer
         if file_compress:
             logging.warn("writing to stdout, so no output compression (use an external tool)")
 
@@ -3103,6 +3175,8 @@ def main():
                         help="produce HTML output, subsumes --links")
     groupP.add_argument("-l", "--links", action="store_true",
                         help="preserve links")
+    groupP.add_argument("-cl", "--collect-links", action="store_true",
+                        help="collect links")
     groupP.add_argument("-s", "--sections", action="store_true",
                         help="preserve sections")
     groupP.add_argument("--lists", action="store_true",
@@ -3143,6 +3217,7 @@ def main():
     args = parser.parse_args()
 
     options.keepLinks = args.links
+    options.collect_links = args.collect_links
     options.keepSections = args.sections
     options.keepLists = args.lists
     options.toHTML = args.html
