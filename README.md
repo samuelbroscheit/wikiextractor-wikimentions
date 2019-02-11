@@ -6,6 +6,6 @@ If you run the following command with the enwiki-XXXXXXXX-pages-articles1.xml-XX
 
     python WikiExtractor.py --json --filter_disambig_pages --processes 2 --collect_links enwiki-XXXXXXXX-pages-articles1.xml-XXXXXXXX.bz2 -o test
 
-then each articles dictionary contains an additional field 'internal_links'. Please see [this notebook](Load wikiextractor data.ipynb) for a HOWTO and code snippet for reading the data.
+then each articles dictionary contains an additional field 'internal_links'. Please see [this notebook](https://github.com/samuelbroscheit/wikiextractor-wikimentions/blob/master/Load%20wikiextractor%20data.ipynb) for a HOWTO and code snippet for reading the data.
 
 For the full README please consult https://github.com/attardi/wikiextractor. However, I have not tested my modifications with other options.
