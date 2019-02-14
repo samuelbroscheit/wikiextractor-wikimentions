@@ -3175,7 +3175,7 @@ def main():
                         help="produce HTML output, subsumes --links")
     groupP.add_argument("-l", "--links", action="store_true",
                         help="preserve links")
-    groupP.add_argument("-cl", "--collect-links", action="store_true",
+    groupP.add_argument("-cl", "--collect_links", action="store_true",
                         help="collect links")
     groupP.add_argument("-s", "--sections", action="store_true",
                         help="preserve sections")
